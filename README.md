@@ -33,6 +33,13 @@ Before running the agent, you'll need to set up a few things on your machine:
     -   **Windows:** `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
     -   **macOS/Linux:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
+## Hardware Recommendations
+
+The agent runs a 20B parameter model locally. For a smooth experience:
+- **GPU:** An NVIDIA RTX 3080 (or equivalent) with at least **16GB of VRAM** is recommended.
+- **Memory:** The `ModelFile.txt` is optimized to offload layers to the GPU. If you have less than 16GB of VRAM, the model will "spill over" to your system RAM, significantly slowing down the response time.
+- **CPU:** At least 8 cores are recommended to handle background tasks and any non-GPU-accelerated layers.
+
 ## Getting Started
 
 ### 1. Fork and Clone
