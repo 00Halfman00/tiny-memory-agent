@@ -1,0 +1,25 @@
+[project]
+name = "tiny-memory-agent"
+version = "0.1.0"
+description = "Tiny LLM agent with long-term memory via MCP"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.86.0",
+    "openai-agents[litellm]>=0.0.17",
+
+    # MCP core
+    "mcp>=1.9.3",
+
+    # Memory backends
+    "libsql-client>=0.3.0",
+    "qdrant-client>=1.7.0",
+
+    # Utilities
+    "python-dotenv>=1.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+]
