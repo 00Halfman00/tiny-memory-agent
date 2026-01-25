@@ -30,62 +30,21 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 
-async def list_memory_graph_tools():
-    """List tools from the Knowledge Graph MCP server (libsql)."""
-    file_path = Path("memory") / Path("graph.db")
-    url = f"file:{file_path.absolute()}"
-
-    memory_graph_params = {
-        "command": "npx",
-        "args": ["-y", "mcp-memory-libsql"],
-        "env": {"LIBSQL_URL": url},
-    }
-
-    async with MCPServerStdio(
-        params=memory_graph_params, client_session_timeout_seconds=30
-    ) as memory_graph:
-        memory_graph_tools = await memory_graph.session.list_tools()
-        return memory_graph_tools.tools
-
-
-async def list_memory_rag_tools():
-    """List tools from the Vector Store RAG memory MCP server (Qdrant)."""
-    long_term_path = Path("memory") / Path("knowledge")
-
-    memory_rag_params = {
-        "command": "uvx",
-        "args": ["mcp-server-qdrant"],
-        "env": {
-            "QDRANT_LOCAL_PATH": str(long_term_path.absolute()),
-            "COLLECTION_NAME": "knowledge",
-            "EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
-        },
-    }
-
-    async with MCPServerStdio(
-        params=memory_rag_params, client_session_timeout_seconds=30
-    ) as memory_rag:
-        memory_rag_tools = await memory_rag.session.list_tools()
-        return memory_rag_tools.tools
-
-
-async def list_question_tools():
-    """List tools from the questions MCP server."""
-    question_params = {"command": "uv", "args": ["run", "questions_mcp_server.py"]}
-
-    async with MCPServerStdio(
-        params=question_params, client_session_timeout_seconds=30
-    ) as question_server:
-        question_tools = await question_server.session.list_tools()
-        return question_tools.tools
-
-
 def create_context(name: str) -> str:
     return f"""
 You are a researcher representing {name}. Your job is to retrieve information that exists or record information that does not exist.
 
 ## MEMORY GOVERNANCE (STRICT)
 You have three memory systems. Follow this logic tree for EVERY turn:
+
+## UPDATED GOVERNANCE
+1. SEARCH PHASE (MANDATORY): 
+   - Before calling ANY "record" or "create" tool, you MUST call `qdrant-find` 
+     and `search_nodes` to see if the information exists.
+   
+2. DECISION PHASE:
+   - If found: Answer the user.
+   - If NOT found: Follow the logic for Graph, RAG, or Questions Server.
 
 1. KNOWLEDGE GRAPH (Professional Facts – Person, Place, Roles)
 
@@ -150,7 +109,7 @@ You have three memory systems. Follow this logic tree for EVERY turn:
     - When answering:
     ** Restate the retrieved content or question in natural language **
     - Knowledge Graph → "This comes from my knowledge graph."
-    - RAG → "I found this in my long-term memory. "
+    - RAG → "I found this in my RAG memory. "
     - Relational DB → "I recorded your question for {name}."
 
 Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -164,35 +123,21 @@ settings = ModelSettings(
 )
 
 # Create LLM
-external_client = AsyncOpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+external_client = AsyncOpenAI(
+    base_url="http://127.0.0.1:11434/v1", api_key="ollama", timeout=600
+)
 LLM = OpenAIChatCompletionsModel(model="gpt-oss:20b-lab", openai_client=external_client)
 
 
-async def run_twin_conversation():
-    """Run a conversation with the Twin agent using all three MCP servers."""
+async def run_twin_conversation_with_servers(
+    memory_graph,
+    memory_rag,
+    question_server,
+):
 
-    # Set up parameters for all three MCP servers
-    file_path = Path("memory") / Path("graph.db")
-    url = f"file:{file_path.absolute()}"
-
-    memory_graph_params = {
-        "command": "npx",
-        "args": ["-y", "mcp-memory-libsql"],
-        "env": {"LIBSQL_URL": url},
-    }
-
-    long_term_path = Path("memory") / Path("knowledge")
-    memory_rag_params = {
-        "command": "uvx",
-        "args": ["mcp-server-qdrant"],
-        "env": {
-            "QDRANT_LOCAL_PATH": str(long_term_path.absolute()),
-            "COLLECTION_NAME": "knowledge",
-            "EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
-        },
-    }
-
-    question_params = {"command": "uv", "args": ["run", "questions_mcp_server.py"]}
+    # -----------------------------
+    # Run a looping conversation using already-running MCP servers.
+    # -----------------------------
 
     # Create context
     name = "Oscar Sanchez"
@@ -204,101 +149,49 @@ async def run_twin_conversation():
     # print(f"\nContext:\n{context}\n")
     print("=" * 60)
 
-    # Temporary debug logging
-    import logging
+    agent = Agent(
+        "Twin",
+        model=LLM,
+        instructions=context,
+        model_settings=settings,
+        mcp_servers=[
+            memory_rag,
+            memory_graph,
+            question_server,
+        ],
+    )
 
-    logging.basicConfig(level=logging.INFO)
+    print("\nType 'exit' or 'quit' to end the conversation.")
+    print("-" * 60)
 
-    with trace("Twin"):
-        async with MCPServerStdio(
-            params=memory_rag_params, client_session_timeout_seconds=30
-        ) as long_term_memory:
-            async with MCPServerStdio(
-                params=memory_graph_params, client_session_timeout_seconds=30
-            ) as medium_term_memory:
-                async with MCPServerStdio(
-                    params=question_params, client_session_timeout_seconds=30
-                ) as question_server:
-                    agent = Agent(
-                        "Twin",
-                        model=LLM,
-                        instructions=context,
-                        model_settings=settings,
-                        mcp_servers=[
-                            long_term_memory,
-                            medium_term_memory,
-                            question_server,
-                        ],
-                    )
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "Hello, I'm a potential customer. Did Oscar go to college?",
-                    #     }
-                    # ]
-                    # ---   store something to RAG
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "My favorite programming language is Rust.",
-                    #     }
-                    # ]
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "I have a dog that is a dalmation named Pongo.",
-                    #     }
-                    # ]
-                    # ---  test RAG to see if it stored favorite programming language: rust
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "Hey Oscar, do you remember what my favorite programming language is?",
-                    #     }
-                    # ]
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "Hey Oscar, do you remember what my dog is named?",
-                    #     }
-                    # ]
-                    #  ---- store something in graph
+    while True:
+        # openai traces
+        with trace("Twin"):
+            try:
+                user_input = (await asyncio.to_thread(input, "\nYou: ")).strip()
+                if not user_input:
+                    continue
 
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "Hello. My name is John Rambo. I'm the Lead Developer at Nebula.io.",
-                    #     }
-                    # ]
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "Hello. My name is Bob McKnight. I sell computers at wholesale prices at Computer Mart.",
-                    #     }
-                    # ]
-                    task = [
-                        {
-                            "role": "user",
-                            "content": "Hello. My name is Jack Montana. I am the governor of Texas.",
-                        }
-                    ]
-                    # task = [
-                    #     {
-                    #         "role": "user",
-                    #         "content": "Hello. My name is Santa Clause. I'm the Lead Toy Maker at the Noth Pole.",
-                    #     }
-                    # ]
+                if user_input.lower() in ["exit", "quit"]:
+                    break
 
-                    print("\n" + "=" * 60)
-                    print("task: ", task)
-                    print("=" * 60)
+                task = [
+                    {
+                        "role": "user",
+                        "content": user_input,
+                    }
+                ]
 
-                    response = await Runner.run(agent, task)
-                    print("\n" + "=" * 60)
-                    print("Agent Response:")
-                    print("=" * 60)
-                    print(response.final_output)
-                    print("=" * 60)
+                response = await Runner.run(agent, task)
+                print(f"\nTwin: {response.final_output}")
+                print("-" * 60)
+
+            except KeyboardInterrupt:
+                print("\n\nExiting conversation...")
+                break
+            except Exception as e:
+                print(f"\nAn error occurred: {e}")
+                break
 
 
 # test graph for successful entries
@@ -342,9 +235,60 @@ def peek_at_graph():
     print("=" * 60 + "\n")
 
 
+def peek_at_questions():
+    db_path = Path("memory") / "questions.db"
+
+    print("\n" + "=" * 60)
+    print("QUESTIONS DB PEEK")
+    print("=" * 60)
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT question
+                FROM questions
+            """
+            )
+
+            rows = cursor.fetchall()
+            if not rows:
+                print("No questions recorded.")
+            else:
+                for (q,) in rows:  # Use (q,) to unpack a single-column tuple
+                    print(f"- {q}")
+
+    except Exception as e:
+        print(f"Error reading questions DB: {e}")
+
+    print("=" * 60)
+
+
 async def main():
-    """Main function to run the lab exercises."""
-    print("Lab 5 - Context Engineering")
+    """Main function to run the exercises."""
+
+    # Check if Ollama is running
+    import httpx
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get("http://127.0.0.1:11434/api/tags")
+            if response.status_code != 200:
+                raise Exception(f"Ollama returned status code {response.status_code}")
+    except Exception as e:
+        print("\n" + "!" * 60)
+        print("ERROR: Cannot connect to Ollama server.")
+        print("Please ensure 'ollama serve' is running in a separate terminal.")
+        print("Refer to the README.md for setup instructions.")
+        print("!" * 60 + "\n")
+        return
+
+    # -----------------------------
+    # MCP servers to be used in exercise
+    # -----------------------------
+    print("Context Engineering")
     print("\n" + "=" * 60)
     print("MCP Servers used:")
     print(
@@ -356,54 +300,106 @@ async def main():
     print("- Questions Server: local questions_mcp_server.py")
     print("=" * 60)
 
-    # # List available tools from each server
-    print("\n1. Listing Memory Graph tools...")
-    try:
-        graph_tools = await list_memory_graph_tools()
-        print(f"Found {len(graph_tools)} tools")
-        for tool in graph_tools:
-            print(f"  - {tool.name}: {tool.description}")
-    except Exception as e:
-        print(f"Error listing graph tools: {e}")
-        import traceback
+    # -----------------------------
+    # MCP server parameters
+    # -----------------------------
+    file_path = Path("memory") / Path("graph.db")
+    url = f"file:{file_path.absolute()}"
 
-        traceback.print_exc()
+    memory_graph_params = {
+        "command": "npx",
+        "args": ["-y", "mcp-memory-libsql"],
+        "env": {"LIBSQL_URL": url},
+    }
 
-    print("\n2. Listing Memory RAG tools...")
-    try:
-        rag_tools = await list_memory_rag_tools()
-        print(f"Found {len(rag_tools)} tools")
-        for tool in rag_tools:
-            print(f"  - {tool.name}: {tool.description}")
-    except Exception as e:
-        print(f"Error listing RAG tools: {e}")
-        import traceback
+    long_term_path = Path("memory") / Path("knowledge")
+    memory_rag_params = {
+        "command": "uvx",
+        "args": ["mcp-server-qdrant"],
+        "env": {
+            "QDRANT_LOCAL_PATH": str(long_term_path.absolute()),
+            "COLLECTION_NAME": "knowledge",
+            "EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
+        },
+    }
 
-        traceback.print_exc()
+    question_params = {"command": "uv", "args": ["run", "twin/questions_mcp_server.py"]}
 
-    print("\n3. Listing Question tools...")
-    try:
-        question_tools = await list_question_tools()
-        print(f"Found {len(question_tools)} tools")
-        for tool in question_tools:
-            print(f"  - {tool.name}: {tool.description}")
-    except Exception as e:
-        print(f"Error listing question tools: {e}")
-        import traceback
+    # -----------------------------
+    # Start MCP servers ONCE
+    # -----------------------------
+    async with MCPServerStdio(
+        params=memory_rag_params, client_session_timeout_seconds=30
+    ) as memory_rag:
+        async with MCPServerStdio(
+            params=memory_graph_params, client_session_timeout_seconds=30
+        ) as memory_graph:
+            async with MCPServerStdio(
+                params=question_params, client_session_timeout_seconds=30
+            ) as question_server:
 
-        traceback.print_exc()
+                # -----------------------------
+                # List tools (safe now)
+                # -----------------------------
+                print("\n1. Listing Memory Graph tools...")
+                graph_tools = (await memory_graph.session.list_tools()).tools
+                print(f"Found {len(graph_tools)} tools")
+                for tool in graph_tools:
+                    print(f"  - {tool.name}: {tool.description}")
 
-    # Run the twin conversation
-    print("\n4. Running Twin conversation...")
-    try:
-        await run_twin_conversation()
-    except Exception as e:
-        print(f"Error running conversation: {e}")
-        import traceback
+                print("\n2. Listing Memory RAG tools...")
+                rag_tools = (await memory_rag.session.list_tools()).tools
+                print(f"Found {len(rag_tools)} tools")
+                for tool in rag_tools:
+                    print(f"  - {tool.name}: {tool.description}")
 
-        traceback.print_exc()
+                print("\n3. Listing Question tools...")
+                question_tools = (await question_server.session.list_tools()).tools
+                print(f"Found {len(question_tools)} tools")
+                for tool in question_tools:
+                    print(f"  - {tool.name}: {tool.description}")
+
+                # -----------------------------
+                # Run conversation
+                # -----------------------------
+                print("\n4. Running Twin conversation...")
+                await run_twin_conversation_with_servers(
+                    memory_graph=memory_graph,
+                    memory_rag=memory_rag,
+                    question_server=question_server,
+                )
+
+                # -----------------------------
+                # peek at RAG data
+                # -----------------------------
+                print("\n" + "=" * 60)
+                print("\n4. Taking a look at records in RAG database...")
+                try:
+                    # Change this in the RAG peek section
+                    results = await memory_rag.session.call_tool(
+                        "qdrant-find", {"query": ""}  # Remove "limit": 20
+                    )
+                    # The response content is in results.content
+                    for content_block in results.content:
+                        print("-", content_block.text)
+                except Exception as e:
+                    print(f"Error peeking at RAG: {e}")
+
+    # -----------------------------
+    # peek at graph data
+    # -----------------------------
+    print("\n" + "=" * 60)
     print("\n4. Taking a look at records in graph database...")
     peek_at_graph()
+    print("=" * 60)
+
+    # -----------------------------
+    # peek at recorded questions in SQL database
+    # -----------------------------
+    print("\n" + "=" * 60)
+    print("\n4. Taking a look at records in relational(questions) database...")
+    peek_at_questions()
+    print("=" * 60)
 
     print("\n" + "=" * 60)
     print("Check traces at: https://platform.openai.com/traces")
